@@ -1,0 +1,13 @@
+{
+  "@@locale": "fr",
+  "@@parent": "en",
+  "greeting": "Bonjour {name} !",
+  "cart.items": "{count, plural, =0 {Votre panier is empty} one {Vous avez un article} other {Vous avez # articles}}",
+  "invite": "{gender, select, male {Il a invité {name}} female {Elle a invité {name}} other {Iel a invité {name}}}",
+  "price": "Prix : {amount, number, ::currency/EUR}",
+  "event_notice": "Voir {eventDate, date, medium} pour plus de détails ; {greeting}",
+  "appTitle": "Réviseur de contrats",
+  "frenchOnly": "clé propre au français",
+  "refA": "Astuce : {@appTitle} veille sur chaque contrat",
+  "frNote": "À noter : {@untranslatedNote}"
+}

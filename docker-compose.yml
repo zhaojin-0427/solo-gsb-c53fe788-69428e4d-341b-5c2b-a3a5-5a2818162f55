@@ -1,0 +1,12 @@
+services:
+  lrc:
+    build: .
+    container_name: lrc-review
+    ports:
+      - "8000:8000"
+    volumes:
+      - lrc-data:/data
+    restart: unless-stopped
+
+volumes:
+  lrc-data:

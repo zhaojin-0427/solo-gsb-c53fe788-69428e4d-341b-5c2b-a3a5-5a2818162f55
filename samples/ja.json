@@ -1,0 +1,13 @@
+{
+  "@@locale": "ja",
+  "@@parent": "en",
+  "greeting": "こんにちは、{user} さん！",
+  "cart.items": "{count, plural, other {アイテムが {count} 個あります}}",
+  "invite": "{gender, select, male {彼が{name}を招待しました} female {彼女が{name}を招待しました} other {招待があります}}",
+  "price": "価格：{amount, number}",
+  "event_notice": "詳細は {eventDate, date, medium} をご覧ください；{greeting}",
+  "appTitle": "契約レビュー台",
+  "untranslatedNote": "フォールバッルバリュー",
+  "brokenRefDemo": "詳しくは {@does.not.exist} を参照",
+  "jaGuide": "ご案内：{@refB}"
+}

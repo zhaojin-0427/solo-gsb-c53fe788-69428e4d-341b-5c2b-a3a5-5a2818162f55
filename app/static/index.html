@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>本地化资源契约审查台</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header>
+  <h1>本地化资源契约审查台</h1>
+  <div id="current-rev" class="rev-badge">当前版本：<span id="rev-val">—</span></div>
+</header>
+
+<nav>
+  <button class="tab active" data-tab="import">① 导入资源</button>
+  <button class="tab" data-tab="issues">② 问题清单</button>
+  <button class="tab" data-tab="graph">③ 回退图</button>
+  <button class="tab" data-tab="diff">④ 差异报告</button>
+  <button class="tab" data-tab="audit">⑤ 审计记录</button>
+  <button class="tab" data-tab="impact">⑥ 引用影响</button>
+  <button class="tab" data-tab="preview">⑦ 消息预览</button>
+  <button class="tab" data-tab="pack">⑧ 语言包编译</button>
+  <button class="tab" data-tab="rename">⑨ 键重命名迁移</button>
+</nav>
+
+<main>
+  <!-- 导入 -->
+  <section id="tab-import" class="panel active">
+    <h2>导入多语言资源</h2>
+    <p class="hint">选择多个 JSON/ARB 文件；文件内可用 <code>"@@locale"</code> 声明语言、
+      <code>"@@parent"</code> 声明父语言，也可在下方手工指定（手工优先）。</p>
+    <form id="import-form">
+      <div class="form-row">
+        <label>基准语言
+          <input type="text" id="base-locale" value="en" required>
+        </label>
+        <label>标签（可选）
+          <input type="text" id="import-label" placeholder="例如 v1.4.0">
+        </label>
+      </div>
+      <div class="form-row">
+        <input type="file" id="files" multiple accept=".json,.arb">
+      </div>
+      <div id="file-meta" class="file-meta"></div>
+      <details>
+        <summary>显式父语言链 / 文件名映射（JSON，可选）</summary>
+        <label>父语言：<code>{"fr":"en","pt_BR":"pt"}</code></label>
+        <textarea id="parents-json" rows="3" placeholder='{"fr":"en"}'></textarea>
+        <label>文件名→语言：<code>{"messages_fr.json":"fr"}</code></label>
+        <textarea id="locales-json" rows="3" placeholder='{"a.json":"de"}'></textarea>
+      </details>
+      <button type="submit" class="primary">导入并审查</button>
+      <span id="import-msg" class="msg"></span>
+    </form>
+  </section>
+
+  <!-- 问题 -->
+  <section id="tab-issues" class="panel">
+    <div class="panel-head">
+      <h2>问题清单</h2>
+      <div>
+        <select id="issue-rev"></select>
+        <select id="filter-severity">
+          <option value="">全部级别</option>
+          <option value="error">错误</option>
+          <option value="warning">警告</option>
+        </select>
+        <select id="filter-code">
+          <option value="">全部类型</option>
+        </select>
+      </div>
+    </div>
+    <div id="issue-summary" class="summary"></div>
+    <table id="issue-table">
+      <thead><tr>
+        <th><input type="checkbox" id="select-all"></th>
+        <th>#</th><th>级别</th><th>类型</th><th>语言</th><th>键</th>
+        <th>位置</th><th>问题与修复建议</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="merge-bar">
+      <span id="selected-count">已选 0 项</span>
+      <button id="btn-merge" class="primary" disabled>原子合并所选修复（新版本）</button>
+      <span id="merge-msg" class="msg"></span>
+    </div>
+  </section>
+
+  <!-- 回退图 -->
+  <section id="tab-graph" class="panel">
+    <div class="panel-head">
+      <h2>显式父语言回退图</h2>
+      <select id="graph-rev"></select>
+    </div>
+    <div id="graph-canvas"></div>
+    <table id="graph-table">
+      <thead><tr><th>语言</th><th>父语言</th><th>回退链</th><th>状态</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <!-- 差异 -->
+  <section id="tab-diff" class="panel">
+    <h2>版本差异报告</h2>
+    <form id="diff-form" class="form-row">
+      <label>旧版本 <select id="diff-from"></select></label>
+      <label>新版本 <select id="diff-to"></select></label>
+      <button type="submit" class="primary">生成差异报告</button>
+    </form>
+    <div id="diff-summary" class="summary"></div>
+    <div id="diff-output"></div>
+  </section>
+
+  <!-- 引用影响分析 -->
+  <section id="tab-impact" class="panel">
+    <div class="panel-head">
+      <h2>引用影响分析</h2>
+      <div>
+        <select id="impact-rev"></select>
+        <button id="impact-export" disabled>导出 JSON</button>
+      </div>
+    </div>
+    <p class="hint">选择不可变版本、语言与消息键，系统解析 ICU 引用（<code>{@key}</code>）
+      并沿显式父语言回退，构建跨语言引用依赖图，计算删除 / 改写该键时的传递影响范围。</p>
+
+    <form id="impact-form" class="form-row">
+      <label>语言 <select id="impact-locale" class="mono"></select></label>
+      <label>消息键 <select id="impact-key" class="mono"></select></label>
+      <button type="submit" class="primary">分析影响</button>
+      <span id="impact-msg" class="msg"></span>
+    </form>
+
+    <div id="impact-stale" class="stale-banner" hidden></div>
+    <div id="impact-meta" class="summary"></div>
+    <div id="impact-target" class="target-box"></div>
+
+    <div class="impact-controls">
+      <label><input type="checkbox" id="imp-filter-subgraph" checked>
+        仅显示影响子图（目标的上游）</label>
+      <label>语言筛选
+        <select id="imp-filter-locale"><option value="">全部语言</option></select>
+      </label>
+      <label><input type="checkbox" id="imp-filter-broken"> 显示断裂引用边</label>
+      <label class="grow"></label>
+      <span class="hint" id="imp-hint"></span>
+    </div>
+
+    <div id="impact-svg-wrap">
+      <svg id="impact-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+    </div>
+    <div id="impact-node-detail" class="node-detail" hidden></div>
+
+    <div class="impact-cols">
+      <div class="impact-col">
+        <h3>受影响消息（最短证据路径可展开）</h3>
+        <table id="impact-table">
+          <thead><tr><th>距离</th><th>类型</th><th>语言</th><th>键</th><th>证据路径</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="impact-col">
+        <h3>循环强连通分量</h3>
+        <div id="impact-sccs" class="scc-list"></div>
+        <h3>受影响语言</h3>
+        <div id="impact-locales" class="summary"></div>
+        <h3>原有断裂引用（<span id="broken-count">0</span>）</h3>
+        <div id="impact-broken"></div>
+      </div>
+    </div>
+
+    <div class="preview-box">
+      <h3>修复集影响预演（不落库）</h3>
+      <p class="hint">对修复集在内存中物化并重建引用图：<b>新增断裂引用</b>为本版本修复集引入的问题，
+        <b>原有断裂引用</b>为修复前就存在的问题；预演不会产生新版本。</p>
+      <div class="form-row">
+        <button id="imp-add-delete">＋ 删除该键</button>
+        <button id="imp-add-rewrite">＋ 改写该键</button>
+        <button id="imp-clear-fixes">清空修复集</button>
+        <span class="hint">或粘贴完整修复集 JSON（与「原子合并」同构）：</span>
+      </div>
+      <textarea id="imp-fixes" rows="6" placeholder='[{"op":"delete","locale":"en","key":"appTitle"}]'></textarea>
+      <div class="form-row">
+        <button id="imp-run-preview" class="primary">运行预演</button>
+        <span id="imp-preview-msg" class="msg"></span>
+      </div>
+      <div id="imp-preview-result"></div>
+    </div>
+  </section>
+
+  <!-- 消息实例预览 -->
+  <section id="tab-preview" class="panel">
+    <div class="panel-head">
+      <h2>消息实例预览</h2>
+      <select id="mp-rev"></select>
+    </div>
+    <p class="hint">选择不可变版本、一个或多个目标语言与消息键，填入同一组变量（JSON）后渲染：
+      消息先沿每个目标语言的<b>显式父语言链</b>找到实际文案；引用 <code>{@key}</code>
+      从<b>所在消息的语言</b>继续解析；数字、日期/时间与复数（CLDR 规则）按目标语言处理，
+      日期时间参数用 ISO 8601 字符串。预览为只读，不产生新版本。</p>
+
+    <form id="mp-form" class="mp-form">
+      <div class="mp-controls">
+        <label>目标语言（可多选）
+          <select id="mp-locales" class="mono" multiple size="5"></select>
+        </label>
+        <div class="mp-controls-right">
+          <div class="form-row" style="margin-bottom:8px">
+            <label>消息键 <select id="mp-key" class="mono"></select></label>
+            <button type="button" id="mp-select-all">全选语言</button>
+            <button type="button" id="mp-clear-locales">清空</button>
+          </div>
+          <label style="width:100%">变量 JSON
+            <textarea id="mp-vars" rows="7" placeholder='{"name": "Ana", "count": 2, "d": "2026-03-09T13:05:07"}'></textarea>
+          </label>
+        </div>
+      </div>
+      <div class="form-row">
+        <button type="submit" class="primary">生成预览</button>
+        <span id="mp-msg" class="msg"></span>
+      </div>
+    </form>
+
+    <div id="mp-stale" class="stale-banner" hidden></div>
+    <div id="mp-meta" class="summary"></div>
+    <div id="mp-results" class="mp-grid"></div>
+  </section>
+
+  <!-- 自包含语言包编译 -->
+  <section id="tab-pack" class="panel">
+    <div class="panel-head">
+      <h2>自包含语言包编译</h2>
+      <select id="pk-rev"></select>
+    </div>
+    <p class="hint">选择不可变版本、目标语言与入口键集合：系统沿每个语言的<b>显式父语言链</b>
+      确定各键实际来源，并从引用所在消息的语言继续解析 <code>{@key}</code>，把引用就地展开为
+      保留变量、复数/选择分支、<code>#</code> 与引号语义的 ICU 模板。导出的 JSON
+      <b>无需原数据库和父链</b>即可使用。断裂引用、引用环或语法错误会阻止整包生成。
+      编译为只读，不改写资源版本；相同输入重复编译得到相同字节。</p>
+
+    <div class="pk-controls">
+      <div class="pk-col">
+        <div class="pk-col-head">
+          <b>目标语言</b>
+          <span class="pk-btns">
+            <button type="button" id="pk-loc-all" class="mini">全选</button>
+            <button type="button" id="pk-loc-none" class="mini">清空</button>
+          </span>
+        </div>
+        <div id="pk-locales" class="pk-list"></div>
+      </div>
+      <div class="pk-col pk-grow">
+        <div class="pk-col-head">
+          <b>入口键</b>
+          <input type="text" id="pk-key-filter" class="mini" placeholder="筛选键名…">
+          <span class="pk-btns">
+            <button type="button" id="pk-key-all" class="mini">全选（筛选结果）</button>
+            <button type="button" id="pk-key-none" class="mini">清空</button>
+          </span>
+        </div>
+        <div id="pk-keys" class="pk-list"></div>
+      </div>
+    </div>
+
+    <div class="form-row">
+      <button type="button" id="pk-compile" class="primary">编译语言包</button>
+      <span id="pk-msg" class="msg"></span>
+    </div>
+
+    <div id="pk-stale" class="stale-banner" hidden></div>
+    <div id="pk-meta" class="summary"></div>
+
+    <div id="pk-errors" class="pk-errors" hidden>
+      <h3>整包未生成（以下错误阻止编译）</h3>
+      <table id="pk-error-table">
+        <thead><tr><th>语言</th><th>入口键</th><th>类型</th><th>引用路径</th><th>详情</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div id="pk-result" hidden>
+      <div class="form-row">
+        <button type="button" id="pk-download" class="primary">⬇ 下载 ZIP 语言包</button>
+        <span class="hint">内容：<code>&lt;语言&gt;.json</code> 与
+          <code>manifest.json</code>（版本摘要、逐键来源、文件 SHA-256）</span>
+      </div>
+      <h3>包内文件与 SHA-256</h3>
+      <table id="pk-files-table">
+        <thead><tr><th>文件</th><th>语言</th><th>字节</th><th>SHA-256</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <h3>逐键来源查看</h3>
+      <div class="pk-src-controls">
+        <label>语言 <select id="pk-src-locale"></select></label>
+        <label>键 <select id="pk-src-key"></select></label>
+      </div>
+      <div id="pk-source" class="pk-source"></div>
+    </div>
+  </section>
+
+  <!-- 资源键重命名迁移 -->
+  <section id="tab-rename" class="panel">
+    <div class="panel-head">
+      <h2>资源键重命名迁移</h2>
+      <select id="rn-rev"></select>
+    </div>
+    <p class="hint">选择一个<b>不可变资源版本</b>，提交有序 <code>old_key → new_key</code>
+      映射。要求源键在资源中存在、目标键不与未迁移键冲突、映射一对一且禁止链式歧义；
+      消息中的 <code>{@key}</code> 按<b>每条引用所在语言的回退链</b>解析并同步改写。
+      <b>试运行不写库</b>；确认时携带 <code>expected_rev</code>，在单事务中改写全部
+      资源键与引用并生成新不可变版本，失败整体回滚；相同计划重复提交幂等。</p>
+
+    <div id="rn-stale" class="stale-banner" hidden></div>
+
+    <div class="rn-editor">
+      <div class="rn-editor-head">
+        <b>有序映射</b>
+        <span class="pk-btns">
+          <button type="button" id="rn-add-row" class="mini">＋ 新增一行</button>
+          <button type="button" id="rn-load-json" class="mini">从 JSON 载入</button>
+          <button type="button" id="rn-copy-json" class="mini">复制为 JSON</button>
+          <button type="button" id="rn-clear" class="mini">清空</button>
+        </span>
+      </div>
+      <div id="rn-rows" class="rn-rows"></div>
+      <details>
+        <summary>JSON 视图（数组，顺序即提交顺序；完全相同的映射对会被去重）</summary>
+        <textarea id="rn-json" rows="6"
+          placeholder='[{"old_key":"appTitle","new_key":"app.title"}]'></textarea>
+      </details>
+    </div>
+
+    <div class="form-row">
+      <button type="button" id="rn-plan" class="primary">试运行（不写库）</button>
+      <button type="button" id="rn-commit" disabled>确认迁移（新版本）</button>
+      <button type="button" id="rn-download" disabled>⬇ 下载结果 JSON</button>
+      <span id="rn-msg" class="msg"></span>
+    </div>
+
+    <div id="rn-errors" class="pk-errors" hidden>
+      <h3>映射未通过校验（以下问题阻止试运行 / 迁移）</h3>
+      <table id="rn-error-table">
+        <thead><tr><th>类型</th><th>old_key</th><th>new_key</th><th>详情</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div id="rn-result" hidden>
+      <div id="rn-meta" class="summary"></div>
+
+      <h3>键改名清单</h3>
+      <table id="rn-keys-table">
+        <thead><tr><th>#</th><th>old_key</th><th>new_key</th><th>命中语言</th>
+          <th>缺失语言（回退，不产生条目）</th></tr></thead>
+        <tbody></tbody>
+      </table>
+
+      <h3>引用改写计划（按语言、键、位置稳定排序）</h3>
+      <table id="rn-refs-table">
+        <thead><tr><th>#</th><th>语言</th><th>所在消息</th><th>位置</th>
+          <th>{@old} → {@new}</th><th>解析落点（回退链）</th></tr></thead>
+        <tbody></tbody>
+      </table>
+
+      <h3>断裂风险（<span id="rn-risk-count">0</span>）</h3>
+      <div id="rn-risks"></div>
+    </div>
+  </section>
+
+  <!-- 审计 -->
+  <section id="tab-audit" class="panel">    <div class="panel-head"><h2>审计记录</h2>
+      <button id="audit-refresh">刷新</button></div>
+    <table id="audit-table">
+      <thead><tr><th>时间(UTC)</th><th>操作者</th><th>动作</th><th>来源版本</th>
+        <th>目标版本</th><th>审查基线</th><th>详情</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+
+<template id="issue-row-tpl">
+  <tr>
+    <td><input type="checkbox" class="pick"></td>
+    <td class="idx"></td>
+    <td class="sev"></td>
+    <td class="code"></td>
+    <td class="loc"></td>
+    <td class="key"></td>
+    <td class="pos"></td>
+    <td class="detail"></td>
+  </tr>
+</template>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

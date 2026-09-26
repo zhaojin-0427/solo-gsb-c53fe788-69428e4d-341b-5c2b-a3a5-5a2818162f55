@@ -1,0 +1,11 @@
+{
+  "@@locale": "de",
+  "@@parent": "en",
+  "greeting": "Hallo {name}!",
+  "cart.items": "{count, plural, one {Sie haben einen Artikel} other {Sie haben # Artikel}}",
+  "invite": "{gender, select, male {Er hat {name} eingeladen} other {Sie haben {name} eingeladen}}",
+  "price": "Preis: {amount}",
+  "event_notice": "Siehe {eventDate, date, medium}; {greeting}",
+  "appTitle": "Vertragsprüfer",
+  "refC": "Hinweis: {@refA}"
+}
