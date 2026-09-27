@@ -249,6 +249,22 @@ def insert_rename_record(conn: Connection, *, base_rev: str, plan_hash: str,
         (base_rev, plan_hash, from_rev, to_rev, input_hash, audit_id))
 
 
+def list_rename_audits(conn: Connection) -> list[dict]:
+    """全部 rename 审计（按提交顺序升序），detail_json 已解码为 ``detail``。
+
+    供旧数据卷升级恢复使用：rename_record 表后建于 rename 审计，历史审计
+    是重建已完成迁移登记关系的唯一来源。
+    """
+    rows = conn.execute(
+        "SELECT * FROM audit WHERE action = 'rename' ORDER BY id").fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["detail"] = json.loads(d.pop("detail_json"))
+        out.append(d)
+    return out
+
+
 def get_audit_by_id(conn: Connection, audit_id: int) -> Optional[dict]:
     row = conn.execute(
         "SELECT * FROM audit WHERE id = ?", (audit_id,)).fetchone()

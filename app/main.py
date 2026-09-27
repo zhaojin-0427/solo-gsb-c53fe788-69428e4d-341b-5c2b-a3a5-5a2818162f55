@@ -24,6 +24,15 @@ def conn():
     if _conn is None:
         _conn = dbmod.connect(DB_PATH)
         dbmod.init_db(_conn)
+        # 旧数据卷升级：rename_record 表后建于 rename 审计。启动时在单个
+        # 写事务内从历史审计恢复已完成迁移的登记记录（幂等：重复启动不
+        # 重复登记；冲突/残缺的关系仅报告、不登记、不覆盖已有记录）。
+        report = service.recover_rename_records(_conn)
+        if report["recovered"] or report["rejected"]:
+            print("[lrc] 重命名完成记录恢复："
+                  f"recovered={len(report['recovered'])} "
+                  f"skipped={len(report['skipped_existing'])} "
+                  f"rejected={len(report['rejected'])}")
     return _conn
 
 

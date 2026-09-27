@@ -127,6 +127,14 @@
     **不新建版本、不追加审计、不切换当前指针**；尚无成功记录的过期请求
     仍返回 `409`；失败事务整体回滚、不会留下可被误认作已完成的记录；
     `(base_rev, plan_hash)` 主键保证并发重复提交只有一次真正生效；
+  - **旧数据卷升级恢复**：`rename_record` 表后建于 `rename` 审计。旧卷里
+    已有成功审计（含源/目标版本、基线与 `detail.plan_hash`）和产物却没有
+    登记记录时，应用启动（`init_db` 建空表后）与确认链路都会在**事务内**
+    从历史审计重建登记：核对源版本存在、产物摘要（用审计中的映射在源版本
+    上重算计划与产物哈希）、审计的源/目标/基线与计划摘要；同源同计划的
+    重复审计关联一致才归并（锚定首次审计），冲突或残缺**明确拒绝回放**
+    （完整性错误而非 409），且绝不覆盖已有有效记录。恢复幂等：重复升级
+    或并发重试不会重复登记；
   - 结果包含**新旧版本号**（`from_rev/new_rev`）与**变更清单**（键改名、
     按消息去重的值改写 from→to）；页面提供**试运行、确认、JSON 下载**，
     版本过期时显示横幅（确认会以 409 拒绝，需重新试运行）。
@@ -152,6 +160,13 @@ docker compose up --build
 
 数据保存在 Docker volume `lrc-data` 中的 SQLite 数据库（`/data/lrc.db`）。
 停止后数据保留；如需清空：`docker compose down -v`。
+
+**旧数据卷升级**：直接 `docker compose up --build` 即可。启动时应用先建
+齐缺失的表（如后引入的 `rename_record`），再在单个写事务内从历史 `rename`
+审计恢复已完成迁移的登记记录（核对源版本、产物摘要与审计关系；重复审计
+关联一致才归并，冲突/残缺只在日志报告、绝不覆盖已有记录）。恢复幂等，
+重复启动不会重复登记；恢复后旧客户端用原 rev/expected_rev/映射重试
+重命名确认会回放首次结果（200 `replayed=true`）而不是 409。
 
 端口可在 `docker-compose.yml` 中修改（左侧宿主机端口）。
 
@@ -261,7 +276,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | POST | `/api/revisions/{rev}/pack` | 编译自包含语言包（`{locales[], keys[]}`）：模板/逐键来源/清单/SHA-256；整包被错误阻止时返回 422 |
 | GET | `/api/revisions/{rev}/pack/download` | 同上的确定性 ZIP 下载（`locales`/`keys` 可重复查询参数） |
 | POST | `/api/revisions/{rev}/rename/plan` | 键重命名试运行（`{mappings:[{old_key,new_key}]}`）：改写计划/引用/风险，不写库；校验失败 400 |
-| POST | `/api/revisions/{rev}/rename/commit` | 确认迁移（`{expected_rev,mappings,actor}`）：单事务生成新版本与审计；按（源版本,计划摘要）回放已完成迁移（200 `replayed=true`，无写入），无成功记录的过期请求 409 |
+| POST | `/api/revisions/{rev}/rename/commit` | 确认迁移（`{expected_rev,mappings,actor}`）：单事务生成新版本与审计；按（源版本,计划摘要）回放已完成迁移（200 `replayed=true`，无写入；旧卷缺失登记时从事务化的历史审计恢复），无成功记录且无历史审计的过期请求 409 |
 | GET | `/api/revisions/{rev}/entries/{locale}` | 某语言键值（可选 `?key=`） |
 | GET | `/api/diff?from_rev=&to_rev=` | 两版本差异报告 |
 | POST | `/api/merge` | 原子合并修复（`base_rev` 过期返回 409） |
@@ -284,7 +299,8 @@ app/
   main.py        # FastAPI 路由
   static/        # index.html / app.js / styles.css（原生 JS）
 samples/         # 带问题的示例资源
-tests/           # pytest：解析器/分析器/端到端 API、合并原子性、预览、语言包与重命名迁移
+tests/           # pytest：解析器/分析器/端到端 API、合并原子性、预览、语言包、
+                 # 重命名迁移与旧卷升级恢复回归
 ```
 
 ## 运行测试
@@ -319,4 +335,8 @@ python -m pytest -q
   已完成迁移按（源版本, 规范化计划摘要）识别：首次确认推进版本后，用原 rev、
   原 `expected_rev` 与同一映射重试会在事务内核对产物与审计关系后回放首次结果
   （不新建版本、不追加审计、不切换指针）；无成功记录的过期请求仍为 409；
-  失败事务不留完成记录，并发重复提交只有一次生效。
+  失败事务不留完成记录，并发重复提交只有一次生效。旧数据卷（有历史
+  `rename` 审计与产物但无 `rename_record` 登记）在启动与确认链路中都会
+  事务化恢复登记：核对源版本、产物摘要（按审计映射重算）与审计的
+  源/目标/基线/计划摘要；重复审计关联一致才归并，冲突或残缺明确拒绝回放，
+  不覆盖已有有效记录；恢复幂等，重复升级或并发重试不重复登记。

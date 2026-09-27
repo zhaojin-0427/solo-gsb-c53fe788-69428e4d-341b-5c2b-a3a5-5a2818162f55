@@ -395,6 +395,163 @@ class RenameReplayError(RuntimeError):
     """事务内核对发现已完成迁移的产物/审计关系不一致（数据完整性故障）。"""
 
 
+# ---------------------------------------------------------------- 旧卷升级恢复
+
+def _verify_rename_audit_group(conn, base_rev: str, plan_hash: str,
+                               audits: list[dict]) -> tuple[Optional[dict],
+                                                            list[str]]:
+    """核对一组同源同计划的历史 rename 审计，决定是否可恢复为完成记录。
+
+    通过时返回 ``(record_kwargs, [])``；冲突或残缺时返回 ``(None, problems)``
+    （只读核对，不写库）。核对项：
+
+    - 重复审计的（源版本, 目标版本, 基线）必须完全一致——关联一致才归并；
+    - 审计的源版本必须等于基线（rename 提交始终以源版本为基线）；
+    - 每条审计必须带 ``detail.plan_hash`` 与 ``mappings``，且重复审计的
+      规范化映射集合一致；
+    - 源版本与产物版本都必须存在；
+    - 产物摘要核对：用审计中的映射在源版本快照上重算计划（计划摘要必须
+      与审计一致）并物化，产物哈希必须等于产物版本的 ``input_hash``。
+    """
+    problems: list[str] = []
+    relations = {(a["from_rev"], a["to_rev"], a["base_rev"]) for a in audits}
+    if len(relations) > 1:
+        problems.append("同源同计划的重复审计新旧版本或基线不一致，拒绝归并")
+        return None, problems
+    from_rev, to_rev, base = next(iter(relations))
+    if not from_rev or not to_rev:
+        problems.append("审计缺少源版本或目标版本")
+    if from_rev != base_rev or base != base_rev:
+        problems.append("审计的源版本与基线不一致")
+
+    mapping_sets: set = set()
+    for a in audits:
+        detail = a.get("detail") or {}
+        if detail.get("plan_hash") != plan_hash:
+            problems.append("审计的计划摘要缺失或与分组不符")
+        m = detail.get("mappings")
+        if not isinstance(m, list) or not m:
+            mapping_sets.add(None)
+            continue
+        try:
+            norm = renamemod.normalize_mappings(m)
+        except renamemod.RenameValidationError:
+            mapping_sets.add(None)
+            continue
+        mapping_sets.add(tuple(sorted(
+            (x["old_key"], x["new_key"]) for x in norm)))
+    if None in mapping_sets:
+        problems.append("审计缺少映射明细，无法核对产物摘要")
+    if len(mapping_sets - {None}) > 1:
+        problems.append("同源同计划的重复审计映射明细不一致，拒绝归并")
+    if problems:
+        return None, problems
+
+    if dbmod.get_revision_meta(conn, from_rev) is None:
+        problems.append("源版本缺失")
+    dst_meta = dbmod.get_revision_meta(conn, to_rev)
+    if dst_meta is None:
+        problems.append("产物版本缺失")
+    if problems:
+        return None, problems
+
+    # 产物摘要核对：按审计映射在源版本上重算计划与产物哈希
+    snap = dbmod.load_revision(conn, from_rev)
+    mappings = (audits[0].get("detail") or {}).get("mappings")
+    try:
+        plan = renamemod.plan_rename(snap, analyze_snapshot(snap), mappings)
+    except renamemod.RenameValidationError:
+        problems.append("审计映射相对源版本不再合法")
+        return None, problems
+    if plan["plan_hash"] != plan_hash:
+        problems.append("审计映射重算的计划摘要与审计记录不符")
+        return None, problems
+    bundles, parents, _text = renamemod.materialize_rename(
+        snap, plan["mappings"], plan["reference_rewrites"])
+    expected_hash = _rename_result_hash(snap, bundles, parents)
+    if expected_hash != dst_meta["input_hash"]:
+        problems.append("产物摘要与源版本按计划重算的结果不符")
+        return None, problems
+
+    rec = {"base_rev": base_rev, "plan_hash": plan_hash,
+           "from_rev": from_rev, "to_rev": to_rev,
+           "input_hash": expected_hash,
+           # 归并到首次完成审计（重复审计关联已核对一致）
+           "audit_id": min(a["id"] for a in audits)}
+    return rec, []
+
+
+def recover_rename_records(conn) -> dict:
+    """旧数据卷升级恢复：从历史 rename 审计事务化重建已完成迁移的登记记录。
+
+    rename_record 表后建于 rename 审计：旧卷里已有成功审计与产物却没有
+    登记记录，升级后客户端用原 rev/expected_rev/映射重试会误判 409。
+    本函数在**单个** ``BEGIN IMMEDIATE`` 事务内扫描全部 rename 审计，
+    按（源版本, 规范化计划摘要）分组核对并补登记：
+
+    - 已有记录的组跳过（不覆盖已有有效记录）；
+    - 同源同计划的重复审计关联一致才归并（锚定首次审计）；
+    - 冲突或残缺的组明确拒绝（写入报告，不登记、不覆盖）；
+    - 幂等：重复升级或并发重试不会重复登记（主键 + 写事务串行）。
+    """
+    groups: dict[tuple[str, Optional[str]], list[dict]] = {}
+    for a in dbmod.list_rename_audits(conn):
+        ph = (a.get("detail") or {}).get("plan_hash")
+        if not isinstance(ph, str) or not ph:
+            ph = None  # 残缺：缺少计划摘要的审计无法核对
+        groups.setdefault((a["base_rev"], ph), []).append(a)
+
+    report: dict = {"recovered": [], "skipped_existing": [], "rejected": []}
+    with dbmod.transaction(conn):
+        for key in sorted(groups, key=lambda k: (k[0] or "", k[1] or "")):
+            base_rev, plan_hash = key
+            audits = groups[key]
+            entry = {"base_rev": base_rev, "plan_hash": plan_hash,
+                     "audit_ids": [a["id"] for a in audits]}
+            if plan_hash is None:
+                report["rejected"].append(
+                    {**entry, "reasons": ["审计缺少计划摘要，无法核对"]})
+                continue
+            if dbmod.find_rename_record(conn, base_rev, plan_hash) is not None:
+                # 已有登记记录：以记录为准，不覆盖
+                report["skipped_existing"].append(entry)
+                continue
+            rec, problems = _verify_rename_audit_group(
+                conn, base_rev, plan_hash, audits)
+            if problems:
+                report["rejected"].append({**entry, "reasons": problems})
+                continue
+            dbmod.insert_rename_record(conn, **rec)
+            report["recovered"].append(rec)
+    return report
+
+
+def _recover_rename_record_from_audits(conn, base_rev: str,
+                                       plan_hash: str) -> Optional[dict]:
+    """确认链路内的定点恢复（调用方必须持有写事务）。
+
+    历史 rename 审计能证明（源版本, 计划摘要）已完成时，在当前事务内补
+    登记并返回记录；审计冲突或残缺时抛 :class:`RenameReplayError` 明确
+    拒绝回放（不落入 409 分支）；没有任何匹配审计时返回 None，由调用方
+    继续走 current_rev 新鲜性判定。
+    """
+    audits = [a for a in dbmod.list_rename_audits(conn)
+              if a["base_rev"] == base_rev
+              and (a.get("detail") or {}).get("plan_hash") == plan_hash]
+    if not audits:
+        return None
+    rec, problems = _verify_rename_audit_group(conn, base_rev, plan_hash,
+                                               audits)
+    if problems:
+        raise RenameReplayError(
+            f"历史重命名审计核对失败，拒绝把该迁移当作已完成回放"
+            f"（{base_rev} / {plan_hash}）：{'；'.join(problems)}")
+    dbmod.insert_rename_record(conn, **rec)
+    faults.fire("rename.recover.after_insert_record", conn=conn,
+                base_rev=base_rev)
+    return dbmod.find_rename_record(conn, base_rev, plan_hash)
+
+
 def rename_commit(conn, *, rev: str, expected_rev: str, mappings: list[dict],
                   actor: str = "user") -> dict:
     """确认迁移：单事务改写全部资源键与引用，生成新不可变版本与审计记录。
@@ -406,12 +563,16 @@ def rename_commit(conn, *, rev: str, expected_rev: str, mappings: list[dict],
       （计划摘要只依赖有序映射对，提交顺序无关）；该查找在写事务内进行，
       早于 current_rev 新鲜性判定：因此首次确认把 current_rev 推进到新版本
       后，客户端用**原 rev、原 expected_rev、同一映射**重试也能命中；
+    - **旧数据卷升级**：rename_record 表后建于 rename 审计。登记记录缺失
+      时，在同一事务内从历史 rename 审计定点恢复（核对源版本、产物摘要、
+      审计的源/目标/基线与计划摘要；重复审计关联一致才归并，冲突或残缺
+      抛 :class:`RenameReplayError` 明确拒绝回放，不落入 409 分支）；
     - 命中后在同一事务内**核对产物版本与审计关系**（产物存在且哈希相符、
       原始 rename 审计存在且 from/to/base/plan_hash 全部一致），核对通过即
       **回放**首次结果：返回相同的新旧版本与变更清单，不新建版本、不追加
       审计、不切换当前指针（响应标记 ``replayed=true``）；
-    - 尚无成功记录的过期请求（current_rev != expected_rev）仍抛
-      :class:`ConflictError`（409）；
+    - 尚无成功记录也无历史审计的过期请求（current_rev != expected_rev）
+      仍抛 :class:`ConflictError`（409）；
     - 记录行与 revision/audit/指针切换共享同一 ``BEGIN IMMEDIATE`` 事务，
       失败事务整体回滚，不可能留下「已完成」假象；(base_rev, plan_hash)
       的主键约束保证并发重复提交只有一次真正生效。
@@ -453,6 +614,11 @@ def rename_commit(conn, *, rev: str, expected_rev: str, mappings: list[dict],
 
         # 1) 先按源版本 + 计划摘要识别已完成迁移（不要求令牌仍然新鲜）。
         rec = dbmod.find_rename_record(conn, rev, plan_hash)
+        if rec is None:
+            # 旧数据卷升级：rename_record 表是后建的，历史 rename 审计可能
+            # 已证明该迁移完成——在同一事务内定点恢复登记；审计冲突或残缺
+            # 时明确拒绝回放（RenameReplayError），不落入 409 分支。
+            rec = _recover_rename_record_from_audits(conn, rev, plan_hash)
         if rec is not None:
             faults.fire("rename.replay.before_verify", conn=conn, rev=rev)
             existing = _verify_completed_rename(conn, rec)
