@@ -259,6 +259,33 @@ def get_audit_by_id(conn: Connection, audit_id: int) -> Optional[dict]:
     return d
 
 
+def list_rename_audits(conn: Connection,
+                       base_rev: Optional[str] = None) -> list[dict]:
+    """全部（或指定源版本的）rename 审计，按 id 升序、detail 已解析。
+
+    供旧数据卷升级时从历史审计恢复 rename_record：旧卷里成功迁移的审计
+    （源/目标版本、基线、detail.plan_hash）与产物版本都在，只是升级后新建
+    的 rename_record 是空表。detail_json 损坏时 detail 退化为空字典
+    （该审计不具备可识别的计划摘要，不会被恢复逻辑采用）。
+    """
+    if base_rev is None:
+        rows = conn.execute(
+            "SELECT * FROM audit WHERE action = 'rename' ORDER BY id").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM audit WHERE action = 'rename' AND base_rev = ?"
+            " ORDER BY id", (base_rev,)).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["detail"] = json.loads(d.pop("detail_json"))
+        except (ValueError, TypeError):
+            d["detail"] = {}
+        out.append(d)
+    return out
+
+
 def list_audit(conn: Connection, limit: int = 100) -> list[dict]:
     rows = conn.execute(
         "SELECT * FROM audit ORDER BY id DESC LIMIT ?", (limit,)).fetchall()

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -17,13 +18,26 @@ from . import service
 DB_PATH = os.environ.get("LRC_DB_PATH", "/data/lrc.db")
 
 _conn = None
+logger = logging.getLogger("lrc.startup")
 
 
 def conn():
     global _conn
     if _conn is None:
-        _conn = dbmod.connect(DB_PATH)
-        dbmod.init_db(_conn)
+        new_conn = dbmod.connect(DB_PATH)
+        dbmod.init_db(new_conn)
+        # 旧数据卷升级：init_db 只新建空 rename_record，这里在事务内从
+        # 历史 rename 审计核对并恢复已完成关系（不新建版本/审计、不切换
+        # 指针、不覆盖已有记录）；冲突或残缺的关系只跳过并记录日志。
+        stats = service.recover_completed_renames(new_conn)
+        if stats["restored"] or stats["rejected"]:
+            logger.warning(
+                "重命名完成关系升级恢复：恢复 %d 组，跳过 %d 组，拒绝 %d 组%s",
+                stats["restored"], stats["skipped"], stats["rejected"],
+                "；拒绝明细：" + json.dumps(stats["rejections"],
+                                            ensure_ascii=False)
+                if stats["rejected"] else "")
+        _conn = new_conn
     return _conn
 
 
@@ -371,6 +385,12 @@ def rename_commit(rev: str, body: RenameCommitBody):
     except renamemod.RenameValidationError as e:
         raise HTTPException(400, {"errors": e.errors,
                                   "message": "重命名映射校验失败"})
+    except service.RenameReplayError as e:
+        # 历史审计/产物关系冲突或残缺：明确拒绝回放（不登记、不覆盖、
+        # 不切换指针），要求人工核对数据完整性。
+        raise HTTPException(500, {"message": "重命名完成记录数据完整性故障，"
+                                             "已拒绝回放",
+                                  "error": str(e)})
     except service.ConflictError as e:
         raise HTTPException(409, str(e))
     except KeyError as e:
